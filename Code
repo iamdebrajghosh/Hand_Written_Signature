@@ -1,0 +1,231 @@
+import os
+import numpy as np
+import cv2
+from sklearn.model_selection import train_test_split
+from tensorflow import keras
+from tensorflow.keras import layers
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+import matplotlib.pyplot as plt
+import logging
+from tensorflow.keras.callbacks import EarlyStopping
+from sklearn.metrics import classification_report, confusion_matrix, roc_curve, auc
+import seaborn as sns
+
+# Set up logging
+logging.basicConfig(filename='training.log', level=logging.INFO)
+
+# Define data directories
+data_dir = "/content/drive/MyDrive/path_to_signature_data"
+genuine_dir = os.path.join(data_dir, "genuine")
+forged_dir = os.path.join(data_dir, "forged")
+
+# Preprocess images and labels
+def preprocess_data(data_dir):
+    images = []
+    labels = []
+    for label, folder in enumerate([genuine_dir, forged_dir]):
+        for filename in os.listdir(folder):
+            img = cv2.imread(os.path.join(folder, filename), cv2.IMREAD_GRAYSCALE)
+            if img is not None:
+                img = cv2.resize(img, (128, 128))  # Resize images to a consistent size
+                img = img / 255.0  # Normalize pixel values
+                images.append(img)
+                labels.append(label)
+            else:
+                logging.warning(f"Unable to load image: {os.path.join(folder, filename)}")
+    return np.array(images), np.array(labels)
+
+images, labels = preprocess_data(data_dir)
+
+# Convert labels to one-hot encoding
+labels = keras.utils.to_categorical(labels, num_classes=2)
+
+# Split the data into training, validation, and test sets
+x_train, x_test, y_train, y_test = train_test_split(images, labels, test_size=0.2, random_state=42)
+x_train, x_val, y_train, y_val = train_test_split(x_train, y_train, test_size=0.2, random_state=42)
+
+# Data Augmentation
+datagen = ImageDataGenerator(
+    rotation_range=15,
+    width_shift_range=0.1,
+    height_shift_range=0.1,
+    shear_range=0.1,
+    zoom_range=0.1,
+    horizontal_flip=True,
+    fill_mode='nearest'
+)
+
+# Define the CNN model
+model = keras.Sequential([
+    layers.Conv2D(32, (3, 3), activation='relu', input_shape=(128, 128, 1)),
+    layers.MaxPooling2D((2, 2)),
+    layers.Conv2D(64, (3, 3), activation='relu'),
+    layers.MaxPooling2D((2, 2)),
+    layers.Conv2D(64, (3, 3), activation='relu'),
+    layers.Flatten(),
+    layers.Dense(64, activation='relu'),
+    layers.Dense(2, activation='softmax')
+])
+
+# Compile the model with precision as a metric
+model.compile(optimizer='adam', loss='categorical_crossentropy',
+              metrics=['accuracy', keras.metrics.Precision(), keras.metrics.Recall(), keras.metrics.AUC(name='auc')])
+
+# Implement early stopping
+early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
+
+# Reshape the images to have a channel dimension
+x_train = x_train.reshape(-1, 128, 128, 1)
+x_val = x_val.reshape(-1, 128, 128, 1)
+
+# Train the model with validation data
+history = model.fit(
+    datagen.flow(x_train, y_train, batch_size=32),
+    epochs=30,
+    validation_data=(x_val, y_val),
+    callbacks=[early_stopping]
+)
+
+# Plot training history
+plt.figure(figsize=(15, 5))
+plt.subplot(1, 4, 1)
+plt.plot(history.history['accuracy'], label='Training Accuracy')
+plt.plot(history.history['val_accuracy'], label='Validation Accuracy')
+plt.legend()
+plt.xlabel('Epochs')
+plt.ylabel('Accuracy')
+plt.title('Training Accuracy vs. Epochs')
+
+# Plot precision metric
+precision_key = [key for key in history.history.keys() if 'precision' in key and 'val' not in key]
+if precision_key:
+    plt.subplot(1, 4, 2)
+    plt.plot(history.history[precision_key[0]], label='Training Precision')
+    val_precision_key = 'val_' + precision_key[0]
+    plt.plot(history.history[val_precision_key], label='Validation Precision')
+    plt.legend()
+    plt.xlabel('Epochs')
+    plt.ylabel('Precision')
+    plt.title('Training Precision vs. Epochs')
+
+# Plot recall metric
+recall_key = [key for key in history.history.keys() if 'recall' in key and 'val' not in key]
+if recall_key:
+    plt.subplot(1, 4, 3)
+    plt.plot(history.history[recall_key[0]], label='Training Recall')
+    val_recall_key = 'val_' + recall_key[0]
+    plt.plot(history.history[val_recall_key], label='Validation Recall')
+    plt.legend()
+    plt.xlabel('Epochs')
+    plt.ylabel('Recall')
+    plt.title('Training Recall vs. Epochs')
+
+# Plot AUC metric
+auc_key = [key for key in history.history.keys() if 'auc' in key and 'val' not in key]
+if auc_key:
+    plt.subplot(1, 4, 4)
+    plt.plot(history.history[auc_key[0]], label='Training AUC')
+    val_auc_key = 'val_' + auc_key[0]
+    plt.plot(history.history[val_auc_key], label='Validation AUC')
+    plt.legend()
+    plt.xlabel('Epochs')
+    plt.ylabel('AUC')
+    plt.title('Training AUC vs. Epochs')
+
+
+plt.figure(figsize=(15, 5))
+
+for i, image_path_to_predict in enumerate(image_files, start=1):
+    # Read the image
+    img = cv2.imread(image_path_to_predict, cv2.IMREAD_GRAYSCALE)
+
+    # Resize the image for display
+    img_display = cv2.resize(img, (128, 128))
+
+    # Predict the signature
+    result = predict_signature(model, image_path_to_predict)
+
+    # Display the image with the predicted label
+    plt.subplot(1, len(image_files), i)
+    plt.imshow(img_display, cmap='gray')
+    plt.title(result)
+    plt.axis('off')
+
+plt.tight_layout()
+plt.show()
+
+# Evaluate the model on the test set
+x_test = x_test.reshape(-1, 128, 128, 1)
+evaluation = model.evaluate(x_test, y_test)
+
+# If you have multiple metrics, you can unpack them like this
+test_loss, *test_metrics = evaluation
+
+# Print the metrics
+print(f"Test Loss: {test_loss}")
+for metric_name, metric_value in zip(model.metrics_names[1:], test_metrics):
+    print(f"Test {metric_name}: {metric_value}")
+
+# Flatten y_test if it's a multilabel indicator
+if y_test.ndim > 1 and y_test.shape[1] > 1:
+    y_test = np.argmax(y_test, axis=1)
+
+# Flatten y_pred if it's a multilabel indicator
+y_pred = np.argmax(model.predict(x_test), axis=1)
+
+# Suppress warnings for precision, recall, and F1-score
+with np.errstate(divide='ignore', invalid='ignore'):
+    print(classification_report(y_test, y_pred, target_names=['Genuine', 'Forged'], zero_division=1))
+
+# Visualize confusion matrix
+cm = confusion_matrix(y_test, y_pred)
+sns.heatmap(cm, annot=True, fmt="d", cmap="Blues")
+plt.xlabel("Predicted Labels")
+plt.ylabel("True Labels")
+plt.show()
+
+# Save the model
+model.save('handwritten_signature_recognition_model.h5')
+
+# ...
+
+# Prediction and plotting for all images in the directory
+def predict_signature(model, image_path):
+    # Read the image file and perform error handling
+    try:
+        image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+
+        if image is None:
+            return "Error: Unable to load the image. Please check the file path."
+
+        # Resize the image to 128x128
+        reduced_image = cv2.resize(image, (128, 128))
+
+        if reduced_image is None:
+            return "Error: Failed to resize the image."
+
+        reduced_image = reduced_image / 255.0  # Normalize pixel values
+        reduced_image = reduced_image.reshape(1, 128, 128, 1)  # Add batch and channel dimension
+        prediction = model.predict(reduced_image)
+
+        if prediction[0][0] > prediction[0][1]:
+            return "Genuine"
+        else:
+            return "Forged"
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+# Example usage of prediction
+image_dir = "/content/drive/MyDrive/path_to_signature_data/Test"  # Replace with the actual directory path
+
+# List all image files in the directory
+image_files = [os.path.join(image_dir, file) for file in os.listdir(image_dir) if file.lower().endswith(('.jpg'))]
+
+for image_path_to_predict in image_files:
+    result = predict_signature(model, image_path_to_predict)
+    if "Genuine" in result:
+        print(f"Image: {image_path_to_predict} is a Genuine Signature.")
+    elif "Forged" in result:
+        print(f"Image: {image_path_to_predict} is a Forged Signature.")
+    else:
+        print(result)
